@@ -1,0 +1,109 @@
+name: CI
+
+permissions:
+  contents: read
+
+on: ['push', 'pull_request']
+
+jobs:
+  ci:
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest]
+        php: [8.1, 8.2]
+        bun: [1.0.4]
+        dependencies: [lowest, highest]
+        experimental: [false]
+    name: 👷 CI PHP-${{ matrix.php }} ${{ matrix.dependencies }} with Bun-${{ matrix.bun }} on ${{ matrix.os }}
+
+    steps:
+      - name: 🚚 Get latest code
+        uses: actions/checkout@v4
+
+      - name: 📂 Cache dependencies
+        id: composer-cache
+        run: |
+          echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+      - uses: actions/cache@v3
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-dependencies-php-${{ matrix.php }}-composer-${{ hashFiles('composer.json') }}
+          restore-keys: |
+            ${{ runner.os }}-dependencies-php-${{ matrix.php }}-composer-
+
+      - name: ⚡️ Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl, dom, gd, intl, mbstring, openssl, pdo, pdo_mysql, tokenizer, zip
+          ini-values: error_reporting=E_ALL
+          tools: composer:v2, php-cs-fixer, phpunit, vimeo/psalm
+          coverage: pcov
+
+      - name: Install Composer dependencies
+        run: composer update --${{ matrix.dependency-version }} --no-interaction --prefer-dist
+
+      - name: Set CI Environment
+        run: |
+          cp .env.example .env.ci
+          set -e
+          sed -i "s|^\(APP_ENV=\s*\).*$|\1ci|" .env.ci
+          printf "The complete `.env.ci` ... \n\n"
+          cat .env.ci
+
+      - name: Generate Key
+        run: |
+          set -e
+          php artisan key:generate --env=ci
+          php artisan queue:restart --env=ci
+
+      - name: Directory Permissions
+        run: |
+          chmod -R 777 storage bootstrap/cache
+          chmod -R 777 storage/
+
+      - name: Clear Caches
+        run: php artisan optimize:clear --env=ci
+
+      - name: Optimize Stuffs
+        run: set -e && php artisan optimize:clear --env=ci
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: ${{ matrix.bun }}
+
+      - name: Install JavaScript dependencies
+        run: |
+          bun install
+          bun run e2e.install
+
+      - name: 🍱 Compile assets
+        run: bun run build
+
+      - name: 🧹 Check code lint
+        run: |
+          bun run check
+          composer check
+
+      - name: ⚗️ Run static analysis
+        run: |
+          composer analyse
+
+      - name: ✅ Test features
+        run: |
+          php artisan optimize --env=ci
+          set -e && php artisan serve --env=ci > /dev/null 2>&1 &
+          bun run test
+          composer test
+
+      - name: 🚀 Execute end-to-end testing
+        run: bun run e2e
+
+      - name: 🧪 Test the whole application
+        run: |
+          composer debug
+          bun run debug
